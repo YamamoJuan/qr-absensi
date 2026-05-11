@@ -12,7 +12,7 @@ app.set("trust proxy", 1);
 
 const PORT = process.env.PORT || 3000;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "kasming";
-const SESSION_SECRET = process.env.SESSION_SECRET || "qr-attendance-secret-2026-change-this";
+const SESSION_SECRET = process.env.SESSION_SECRET || "change-this-session-secret";
 
 const SUPABASE_URL =
   process.env.SUPABASE_URL ||
@@ -35,6 +35,18 @@ const supabase = SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+app.use((req, res, next) => {
+  if (req.path === "/" || req.path.startsWith("/api") || req.path.startsWith("/attendance")) {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+    res.setHeader("Surrogate-Control", "no-store");
+  }
+
+  next();
+});
+
 app.use(express.static(path.join(__dirname, "public")));
 
 function db() {
@@ -45,8 +57,49 @@ function db() {
   return supabase;
 }
 
+function cleanBaseUrl(value) {
+  if (!value) return null;
+
+  const cleaned = String(value).trim().replace(/\/+$/, "");
+
+  if (!cleaned) return null;
+  if (/^https?:\/\//i.test(cleaned)) return cleaned;
+
+  return `https://${cleaned}`;
+}
+
 function getBaseUrl(req) {
-  return `${req.protocol}://${req.get("host")}`;
+  const configuredUrl = cleanBaseUrl(
+    process.env.APP_URL ||
+    process.env.PUBLIC_APP_URL ||
+    process.env.VERCEL_PROJECT_PRODUCTION_URL ||
+    process.env.VERCEL_URL
+  );
+
+  if (configuredUrl) return configuredUrl;
+
+  const forwardedHost = (req.get("x-forwarded-host") || "").split(",")[0].trim();
+  const forwardedProto = (req.get("x-forwarded-proto") || "").split(",")[0].trim();
+  const host = forwardedHost || req.get("host");
+  const proto = forwardedProto || (host && host.includes("localhost") ? req.protocol : "https");
+
+  return `${proto}://${host}`.replace(/\/+$/, "");
+}
+
+function normalizeSessionId(value) {
+  if (!value) return "";
+
+  return decodeURIComponent(String(value))
+    .trim()
+    .replace(/^['"]|['"]$/g, "")
+    .split("?")[0]
+    .split("#")[0]
+    .replace(/\/+$/, "")
+    .toLowerCase();
+}
+
+function getRequestedSessionId(req) {
+  return normalizeSessionId(req.params.sessionId || req.query.sid || req.query.sessionId || req.query.id);
 }
 
 function isUuid(value) {
@@ -84,34 +137,23 @@ function safeEqual(a, b) {
   const aBuffer = Buffer.from(String(a));
   const bBuffer = Buffer.from(String(b));
 
-  if (aBuffer.length !== bBuffer.length) {
-    return false;
-  }
+  if (aBuffer.length !== bBuffer.length) return false;
 
   return crypto.timingSafeEqual(aBuffer, bBuffer);
 }
 
 function verifyAdminToken(token) {
-  if (!token || !token.includes(".")) {
-    return false;
-  }
+  if (!token || !token.includes(".")) return false;
 
   const [timestamp, signature] = token.split(".");
   const createdAt = Number(timestamp);
 
-  if (!createdAt || Number.isNaN(createdAt)) {
-    return false;
-  }
+  if (!createdAt || Number.isNaN(createdAt)) return false;
 
   const maxAgeMs = 1000 * 60 * 60 * 2;
-  const isExpired = Date.now() - createdAt > maxAgeMs;
+  if (Date.now() - createdAt > maxAgeMs) return false;
 
-  if (isExpired) {
-    return false;
-  }
-
-  const expectedSignature = signToken(timestamp);
-  return safeEqual(signature, expectedSignature);
+  return safeEqual(signature, signToken(timestamp));
 }
 
 function setAdminCookie(res) {
@@ -134,22 +176,16 @@ function clearAdminCookie(res) {
 }
 
 function isAdmin(req) {
-  const token = getCookie(req, "admin_auth");
-  return verifyAdminToken(token);
+  return verifyAdminToken(getCookie(req, "admin_auth"));
 }
 
 function requireAdmin(req, res, next) {
-  if (isAdmin(req)) {
-    return next();
-  }
-
+  if (isAdmin(req)) return next();
   return res.redirect("/admin/login");
 }
 
 function requireAdminApi(req, res, next) {
-  if (isAdmin(req)) {
-    return next();
-  }
+  if (isAdmin(req)) return next();
 
   return res.status(401).json({
     success: false,
@@ -186,7 +222,7 @@ function mapLogRow(logRow) {
 
 async function saveLog({ sessionId, name, status, reason, time }) {
   try {
-    const { error } = await db()
+    await db()
       .from("attendance_logs")
       .insert({
         session_id: sessionId || null,
@@ -195,31 +231,29 @@ async function saveLog({ sessionId, name, status, reason, time }) {
         reason,
         created_at: time || new Date().toISOString()
       });
-
-    if (error) {
-      console.error("SAVE_LOG_ERROR", error);
-    }
   } catch (error) {
-    console.error("SAVE_LOG_FATAL", error);
+    console.error("SAVE_LOG_ERROR", error);
   }
+}
+
+function sendInvalidQr(res) {
+  return res.status(404).sendFile(path.join(__dirname, "public", "invalid-qr.html"));
 }
 
 function getEnvStatus() {
   return {
     NODE_ENV: process.env.NODE_ENV || null,
+    APP_URL_EXISTS: Boolean(process.env.APP_URL),
+    VERCEL_URL_EXISTS: Boolean(process.env.VERCEL_URL),
     ADMIN_PASSWORD_EXISTS: Boolean(process.env.ADMIN_PASSWORD),
     SESSION_SECRET_EXISTS: Boolean(process.env.SESSION_SECRET),
-
     SUPABASE_URL_EXISTS: Boolean(process.env.SUPABASE_URL),
     NEXT_PUBLIC_SUPABASE_URL_EXISTS: Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL),
     VITE_SUPABASE_URL_EXISTS: Boolean(process.env.VITE_SUPABASE_URL),
-
     SUPABASE_SERVICE_ROLE_KEY_EXISTS: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
     SUPABASE_SECRET_KEY_EXISTS: Boolean(process.env.SUPABASE_SECRET_KEY),
     SUPABASE_SERVICE_KEY_EXISTS: Boolean(process.env.SUPABASE_SERVICE_KEY),
-
     SUPABASE_ANON_KEY_EXISTS_BUT_NOT_USED: Boolean(process.env.SUPABASE_ANON_KEY),
-
     resolvedSupabaseUrl: Boolean(SUPABASE_URL),
     resolvedSupabaseServerKey: Boolean(SUPABASE_SERVICE_ROLE_KEY)
   };
@@ -266,6 +300,7 @@ async function databaseDebugHandler(req, res) {
       success: true,
       message: "Supabase connected dan tabel attendance_sessions bisa dibaca.",
       envStatus,
+      baseUrl: getBaseUrl(req),
       sampleRows: sessionsCheck.data || []
     });
   } catch (error) {
@@ -285,10 +320,7 @@ app.get("/", (req, res) => {
 });
 
 app.get("/admin/login", (req, res) => {
-  if (isAdmin(req)) {
-    return res.redirect("/admin");
-  }
-
+  if (isAdmin(req)) return res.redirect("/admin");
   res.sendFile(path.join(__dirname, "views", "login.html"));
 });
 
@@ -315,13 +347,19 @@ app.get("/admin", requireAdmin, (req, res) => {
 
 app.get(["/api/debug/database", "/api/debug/supabase"], databaseDebugHandler);
 
+app.get("/attendance", (req, res) => {
+  const sessionId = getRequestedSessionId(req);
+
+  if (!isUuid(sessionId)) return sendInvalidQr(res);
+
+  return res.redirect(302, `/attendance/${sessionId}`);
+});
+
 app.get("/attendance/:sessionId", async (req, res) => {
   try {
-    const { sessionId } = req.params;
+    const sessionId = getRequestedSessionId(req);
 
-    if (!isUuid(sessionId)) {
-      return res.sendFile(path.join(__dirname, "public", "invalid-qr.html"));
-    }
+    if (!isUuid(sessionId)) return sendInvalidQr(res);
 
     const { data: sessionData, error } = await db()
       .from("attendance_sessions")
@@ -329,16 +367,11 @@ app.get("/attendance/:sessionId", async (req, res) => {
       .eq("id", sessionId)
       .maybeSingle();
 
-    if (error) {
-      throw error;
-    }
-
-    if (!sessionData) {
-      return res.sendFile(path.join(__dirname, "public", "invalid-qr.html"));
-    }
+    if (error) throw error;
+    if (!sessionData) return sendInvalidQr(res);
 
     if (sessionData.used_at) {
-      return res.sendFile(path.join(__dirname, "public", "qr-used.html"));
+      return res.status(410).sendFile(path.join(__dirname, "public", "qr-used.html"));
     }
 
     return res.sendFile(path.join(__dirname, "public", "attendance.html"));
@@ -361,16 +394,24 @@ app.post("/api/generate-session", async (req, res) => {
   try {
     const sessionId = crypto.randomUUID();
 
-    const { error } = await db()
+    const { data: insertedSession, error } = await db()
       .from("attendance_sessions")
-      .insert({ id: sessionId });
+      .insert({ id: sessionId })
+      .select("id")
+      .single();
 
-    if (error) {
-      throw error;
+    if (error) throw error;
+
+    if (!insertedSession || insertedSession.id !== sessionId) {
+      throw new Error("Session gagal tersimpan ke Supabase.");
     }
 
     const attendanceUrl = `${getBaseUrl(req)}/attendance/${sessionId}`;
-    const qrCodeDataUrl = await QRCode.toDataURL(attendanceUrl);
+    const qrCodeDataUrl = await QRCode.toDataURL(attendanceUrl, {
+      errorCorrectionLevel: "M",
+      margin: 2,
+      scale: 8
+    });
 
     return res.json({
       success: true,
@@ -430,18 +471,14 @@ app.get("/api/sessions", requireAdminApi, async (req, res) => {
 
     (attendeesResult.data || []).forEach((attendeeRow) => {
       const sessionData = sessionMap.get(attendeeRow.session_id);
-      if (sessionData) {
-        sessionData.attendees.push(mapAttendeeRow(attendeeRow));
-      }
+      if (sessionData) sessionData.attendees.push(mapAttendeeRow(attendeeRow));
     });
 
     const globalLogs = (logsResult.data || []).map(mapLogRow);
 
     globalLogs.forEach((log) => {
       const sessionData = sessionMap.get(log.sessionId);
-      if (sessionData) {
-        sessionData.logs.push(log);
-      }
+      if (sessionData) sessionData.logs.push(log);
     });
 
     return res.json({
@@ -464,7 +501,7 @@ app.get("/api/sessions", requireAdminApi, async (req, res) => {
 
 app.get("/api/session/:sessionId", requireAdminApi, async (req, res) => {
   try {
-    const { sessionId } = req.params;
+    const sessionId = getRequestedSessionId(req);
 
     if (!isUuid(sessionId)) {
       return res.status(404).json({
@@ -526,7 +563,7 @@ app.get("/api/session/:sessionId", requireAdminApi, async (req, res) => {
 });
 
 app.post("/api/attendance/:sessionId", async (req, res) => {
-  const { sessionId } = req.params;
+  const sessionId = getRequestedSessionId(req);
   const rawName = req.body.name || "";
   const name = rawName.trim();
 
@@ -539,7 +576,7 @@ app.post("/api/attendance/:sessionId", async (req, res) => {
         reason: "SessionId tidak valid"
       });
 
-      return res.json({
+      return res.status(400).json({
         success: false,
         message: "Absen belum berhasil"
       });
@@ -553,9 +590,9 @@ app.post("/api/attendance/:sessionId", async (req, res) => {
         reason: "Nama kosong"
       });
 
-      return res.json({
+      return res.status(400).json({
         success: false,
-        message: "Absen belum berhasil"
+        message: "Nama wajib diisi"
       });
     }
 
@@ -566,9 +603,7 @@ app.post("/api/attendance/:sessionId", async (req, res) => {
       })
       .single();
 
-    if (error) {
-      throw error;
-    }
+    if (error) throw error;
 
     if (!result.success) {
       const reason = result.message === "QR ini sudah digunakan untuk absen"
@@ -582,7 +617,7 @@ app.post("/api/attendance/:sessionId", async (req, res) => {
         reason
       });
 
-      return res.json({
+      return res.status(409).json({
         success: false,
         message: result.message || "Absen belum berhasil"
       });
@@ -624,7 +659,6 @@ app.post("/api/attendance/:sessionId", async (req, res) => {
 if (require.main === module) {
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running at http://localhost:${PORT}`);
-    console.log(`Main page: http://localhost:${PORT}`);
     console.log(`Admin login: http://localhost:${PORT}/admin/login`);
   });
 }

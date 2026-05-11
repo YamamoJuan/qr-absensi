@@ -1,16 +1,20 @@
 {
   "name": "qr-attendance-simple",
   "version": "1.0.0",
-  "description": "Simple QR Code attendance website using Node.js, Express, HTML, CSS, and vanilla JavaScript",
+  "description": "Simple QR Code attendance website using Node.js, Express, HTML, CSS, Supabase, and vanilla JavaScript",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "node server.js",
+    "check": "node --check server.js"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.4",
     "dotenv": "^16.4.5",
     "express": "^4.18.3",
-    "express-session": "^1.18.0",
     "qrcode": "^1.5.4"
   }
 }
