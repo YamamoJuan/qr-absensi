@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Form Absensi</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="page-center">
+    <section class="main-card small-card">
+      <h1>Form Absensi</h1>
+      <p class="subtitle">Masukkan nama kamu untuk absen.</p>
+
+      <form id="attendanceForm">
+        <label for="name">Nama</label>
+        <input type="text" id="name" name="name" autocomplete="off">
+
+        <button type="submit" class="primary-button full-button">Absen</button>
+      </form>
+
+      <p id="message" class="message"></p>
+    </section>
+  </main>
+
+  <script src="/attendance.js"></script>
+</body>
+</html>

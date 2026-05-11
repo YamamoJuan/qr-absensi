@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Login Admin</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="page-center">
+    <section class="main-card small-card">
+      <h1>Login Admin</h1>
+      <p class="subtitle">Masukkan password admin untuk membuka monitoring.</p>
+
+      <form action="/admin/login" method="POST">
+        <label for="password">Password Admin</label>
+        <input type="password" id="password" name="password" autocomplete="off">
+
+        <button type="submit" class="primary-button full-button">Login</button>
+      </form>
+
+      <p id="loginError" class="message failed hidden">
+        Password salah.
+      </p>
+    </section>
+  </main>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("error") === "1") {
+      document.getElementById("loginError").classList.remove("hidden");
+    }
+  </script>
+</body>
+</html>

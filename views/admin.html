@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Monitoring Absensi</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="container">
+    <div class="top-bar">
+      <div>
+        <h1>Monitoring Absensi</h1>
+        <p class="subtitle">Halaman ini hanya untuk admin.</p>
+      </div>
+
+      <div class="top-actions">
+        <a class="secondary-link" href="/">Main Page</a>
+
+        <form action="/admin/logout" method="POST">
+          <button type="submit" class="danger-button">Logout</button>
+        </form>
+      </div>
+    </div>
+
+    <section class="card">
+      <button id="refreshBtn" class="primary-button">Refresh Data</button>
+
+      <p>Total session: <strong id="totalSessions">0</strong></p>
+
+      <label for="sessionSelect">Pilih Session</label>
+      <select id="sessionSelect"></select>
+
+      <p id="emptySessionMessage" class="message"></p>
+    </section>
+
+    <section id="summarySection" class="card hidden">
+      <h2>Data Session</h2>
+
+      <p>Session ID:</p>
+      <code id="sessionIdText"></code>
+
+      <p>Dibuat pada: <strong id="createdAtText">-</strong></p>
+      <p>Status QR: <strong id="qrStatusText">-</strong></p>
+      <p>Total absen berhasil: <strong id="totalAttendance">0</strong></p>
+
+      <h3>Nama yang Sudah Absen</h3>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>No</th>
+              <th>Nama</th>
+              <th>Waktu Absen</th>
+            </tr>
+          </thead>
+          <tbody id="attendeesTable"></tbody>
+        </table>
+      </div>
+
+      <h3>Log Percobaan Absen Session Ini</h3>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>No</th>
+              <th>Nama</th>
+              <th>Status</th>
+              <th>Alasan</th>
+              <th>Waktu</th>
+            </tr>
+          </thead>
+          <tbody id="sessionLogsTable"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Log Semua Percobaan Absen</h2>
+
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>No</th>
+              <th>Session ID</th>
+              <th>Nama</th>
+              <th>Status</th>
+              <th>Alasan</th>
+              <th>Waktu</th>
+            </tr>
+          </thead>
+          <tbody id="globalLogsTable"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="/admin.js"></script>
+</body>
+</html>

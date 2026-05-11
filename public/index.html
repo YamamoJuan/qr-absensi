@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Generate QR Absensi</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="page-center">
+    <section class="main-card">
+      <h1>Generate QR Absensi</h1>
+      <p class="subtitle">
+        Klik tombol di bawah untuk membuat QR Code absensi baru.
+      </p>
+
+      <button id="generateBtn" class="primary-button">Generate QR</button>
+
+      <div id="qrSection" class="qr-section hidden">
+        <p class="label">Session ID</p>
+        <code id="sessionIdText"></code>
+
+        <div class="qr-box">
+          <img id="qrImage" alt="QR Code Absensi">
+        </div>
+
+        <p class="hint">
+          Scan QR ini untuk masuk ke form absensi.
+        </p>
+      </div>
+
+      <p id="message" class="message"></p>
+    </section>
+  </main>
+
+  <script src="/index.js"></script>
+</body>
+</html>
