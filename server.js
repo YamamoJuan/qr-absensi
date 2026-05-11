@@ -2,18 +2,27 @@ require("dotenv").config();
 
 const express = require("express");
 const path = require("path");
-const fs = require("fs");
 const crypto = require("crypto");
 const session = require("express-session");
 const QRCode = require("qrcode");
+const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 
 const PORT = process.env.PORT || 3000;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin12345";
 const SESSION_SECRET = process.env.SESSION_SECRET || "qr-attendance-secret-2026";
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY;
 
-const DATA_FILE = path.join(__dirname, "data", "sessions.json");
+const supabase = SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
+  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false
+      }
+    })
+  : null;
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -25,78 +34,72 @@ app.use(
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
-      maxAge: 1000 * 60 * 60 * 2
+      maxAge: 1000 * 60 * 60 * 2,
+      sameSite: "lax",
+      secure: process.env.NODE_ENV === "production"
     }
   })
 );
 
 app.use(express.static(path.join(__dirname, "public")));
 
-function createEmptyData() {
-  return {
-    sessions: {},
-    globalLogs: []
-  };
-}
-
-function normalizeData(data) {
-  if (!data || typeof data !== "object") {
-    return createEmptyData();
+function db() {
+  if (!supabase) {
+    throw new Error("Supabase belum dikonfigurasi. Isi SUPABASE_URL dan SUPABASE_SERVICE_ROLE_KEY.");
   }
 
-  if (!data.sessions) {
-    return {
-      sessions: data,
-      globalLogs: []
-    };
-  }
-
-  if (!Array.isArray(data.globalLogs)) {
-    data.globalLogs = [];
-  }
-
-  return data;
-}
-
-function readData() {
-  try {
-    if (!fs.existsSync(DATA_FILE)) {
-      fs.writeFileSync(DATA_FILE, JSON.stringify(createEmptyData(), null, 2));
-    }
-
-    const rawData = fs.readFileSync(DATA_FILE, "utf8");
-
-    if (!rawData.trim()) {
-      return createEmptyData();
-    }
-
-    return normalizeData(JSON.parse(rawData));
-  } catch (error) {
-    console.error("Failed to read data:", error.message);
-    return createEmptyData();
-  }
-}
-
-function writeData(data) {
-  try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
-  } catch (error) {
-    console.error("Failed to write data:", error.message);
-  }
+  return supabase;
 }
 
 function getBaseUrl(req) {
   return `${req.protocol}://${req.get("host")}`;
 }
 
-function createLog({ sessionId, name, status, reason }) {
+function isUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function mapSessionRow(sessionRow) {
   return {
-    sessionId,
-    name,
-    status,
-    reason,
-    time: new Date().toISOString()
+    sessionId: sessionRow.id,
+    createdAt: sessionRow.created_at,
+    usedAt: sessionRow.used_at,
+    attendees: [],
+    logs: []
   };
+}
+
+function mapAttendeeRow(attendeeRow) {
+  return {
+    name: attendeeRow.name,
+    time: attendeeRow.attended_at
+  };
+}
+
+function mapLogRow(logRow) {
+  return {
+    sessionId: logRow.session_id,
+    name: logRow.name,
+    status: logRow.status,
+    reason: logRow.reason,
+    time: logRow.created_at
+  };
+}
+
+async function saveLog({ sessionId, name, status, reason, time }) {
+  const { error } = await db()
+    .from("attendance_logs")
+    .insert({
+      session_id: sessionId || null,
+      name: name || null,
+      status,
+      reason,
+      created_at: time || new Date().toISOString()
+    });
+
+  if (error) {
+    console.error("Failed to save log:", error.message);
+  }
 }
 
 function requireAdmin(req, res, next) {
@@ -151,22 +154,37 @@ app.get("/admin", requireAdmin, (req, res) => {
   res.sendFile(path.join(__dirname, "views", "admin.html"));
 });
 
-app.get("/attendance/:sessionId", (req, res) => {
-  const { sessionId } = req.params;
-  const data = readData();
-  const sessionData = data.sessions[sessionId];
+app.get("/attendance/:sessionId", async (req, res) => {
+  try {
+    const { sessionId } = req.params;
 
-  if (!sessionData) {
-    return res.sendFile(path.join(__dirname, "public", "invalid-qr.html"));
+    if (!isUuid(sessionId)) {
+      return res.sendFile(path.join(__dirname, "public", "invalid-qr.html"));
+    }
+
+    const { data: sessionData, error } = await db()
+      .from("attendance_sessions")
+      .select("id, used_at")
+      .eq("id", sessionId)
+      .maybeSingle();
+
+    if (error) {
+      throw error;
+    }
+
+    if (!sessionData) {
+      return res.sendFile(path.join(__dirname, "public", "invalid-qr.html"));
+    }
+
+    if (sessionData.used_at) {
+      return res.sendFile(path.join(__dirname, "public", "qr-used.html"));
+    }
+
+    return res.sendFile(path.join(__dirname, "public", "attendance.html"));
+  } catch (error) {
+    console.error(error);
+    return res.status(500).send("Terjadi kesalahan server.");
   }
-
-  const qrAlreadyUsed = Boolean(sessionData.usedAt) || sessionData.attendees.length > 0;
-
-  if (qrAlreadyUsed) {
-    return res.sendFile(path.join(__dirname, "public", "qr-used.html"));
-  }
-
-  return res.sendFile(path.join(__dirname, "public", "attendance.html"));
 });
 
 app.get("/thank-you", (req, res) => {
@@ -175,18 +193,15 @@ app.get("/thank-you", (req, res) => {
 
 app.post("/api/generate-session", async (req, res) => {
   try {
-    const data = readData();
     const sessionId = crypto.randomUUID();
 
-    data.sessions[sessionId] = {
-      sessionId,
-      createdAt: new Date().toISOString(),
-      usedAt: null,
-      attendees: [],
-      logs: []
-    };
+    const { error } = await db()
+      .from("attendance_sessions")
+      .insert({ id: sessionId });
 
-    writeData(data);
+    if (error) {
+      throw error;
+    }
 
     const attendanceUrl = `${getBaseUrl(req)}/attendance/${sessionId}`;
     const qrCodeDataUrl = await QRCode.toDataURL(attendanceUrl);
@@ -207,125 +222,209 @@ app.post("/api/generate-session", async (req, res) => {
   }
 });
 
-app.get("/api/sessions", requireAdminApi, (req, res) => {
-  const data = readData();
+app.get("/api/sessions", requireAdminApi, async (req, res) => {
+  try {
+    const [sessionsResult, attendeesResult, logsResult] = await Promise.all([
+      db()
+        .from("attendance_sessions")
+        .select("id, created_at, used_at")
+        .order("created_at", { ascending: false }),
+      db()
+        .from("attendance_records")
+        .select("session_id, name, attended_at")
+        .order("attended_at", { ascending: true }),
+      db()
+        .from("attendance_logs")
+        .select("session_id, name, status, reason, created_at")
+        .order("created_at", { ascending: true })
+    ]);
 
-  const sessions = Object.values(data.sessions).sort((a, b) => {
-    return new Date(b.createdAt) - new Date(a.createdAt);
-  });
+    if (sessionsResult.error) throw sessionsResult.error;
+    if (attendeesResult.error) throw attendeesResult.error;
+    if (logsResult.error) throw logsResult.error;
 
-  res.json({
-    success: true,
-    sessions,
-    globalLogs: data.globalLogs
-  });
-});
+    const sessionMap = new Map();
 
-app.get("/api/session/:sessionId", requireAdminApi, (req, res) => {
-  const { sessionId } = req.params;
-  const data = readData();
-  const sessionData = data.sessions[sessionId];
+    const sessions = (sessionsResult.data || []).map((sessionRow) => {
+      const mappedSession = mapSessionRow(sessionRow);
+      sessionMap.set(mappedSession.sessionId, mappedSession);
+      return mappedSession;
+    });
 
-  if (!sessionData) {
-    return res.status(404).json({
+    (attendeesResult.data || []).forEach((attendeeRow) => {
+      const sessionData = sessionMap.get(attendeeRow.session_id);
+      if (sessionData) {
+        sessionData.attendees.push(mapAttendeeRow(attendeeRow));
+      }
+    });
+
+    const globalLogs = (logsResult.data || []).map(mapLogRow);
+
+    globalLogs.forEach((log) => {
+      const sessionData = sessionMap.get(log.sessionId);
+      if (sessionData) {
+        sessionData.logs.push(log);
+      }
+    });
+
+    res.json({
+      success: true,
+      sessions,
+      globalLogs
+    });
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).json({
       success: false,
-      message: "Session tidak ditemukan"
+      message: "Gagal mengambil data monitoring"
     });
   }
-
-  res.json({
-    success: true,
-    session: sessionData
-  });
 });
 
-app.post("/api/attendance/:sessionId", (req, res) => {
-  const { sessionId } = req.params;
-  const data = readData();
-  const sessionData = data.sessions[sessionId];
+app.get("/api/session/:sessionId", requireAdminApi, async (req, res) => {
+  try {
+    const { sessionId } = req.params;
 
+    if (!isUuid(sessionId)) {
+      return res.status(404).json({
+        success: false,
+        message: "Session tidak ditemukan"
+      });
+    }
+
+    const { data: sessionRow, error: sessionError } = await db()
+      .from("attendance_sessions")
+      .select("id, created_at, used_at")
+      .eq("id", sessionId)
+      .maybeSingle();
+
+    if (sessionError) throw sessionError;
+
+    if (!sessionRow) {
+      return res.status(404).json({
+        success: false,
+        message: "Session tidak ditemukan"
+      });
+    }
+
+    const [{ data: attendees, error: attendeesError }, { data: logs, error: logsError }] = await Promise.all([
+      db()
+        .from("attendance_records")
+        .select("name, attended_at")
+        .eq("session_id", sessionId)
+        .order("attended_at", { ascending: true }),
+      db()
+        .from("attendance_logs")
+        .select("session_id, name, status, reason, created_at")
+        .eq("session_id", sessionId)
+        .order("created_at", { ascending: true })
+    ]);
+
+    if (attendeesError) throw attendeesError;
+    if (logsError) throw logsError;
+
+    const sessionData = mapSessionRow(sessionRow);
+    sessionData.attendees = (attendees || []).map(mapAttendeeRow);
+    sessionData.logs = (logs || []).map(mapLogRow);
+
+    res.json({
+      success: true,
+      session: sessionData
+    });
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).json({
+      success: false,
+      message: "Gagal mengambil session"
+    });
+  }
+});
+
+app.post("/api/attendance/:sessionId", async (req, res) => {
+  const { sessionId } = req.params;
   const rawName = req.body.name || "";
   const name = rawName.trim();
 
-  if (!sessionData) {
-    const log = createLog({
+  try {
+    if (!isUuid(sessionId)) {
+      await saveLog({
+        sessionId,
+        name,
+        status: "failed",
+        reason: "SessionId tidak valid"
+      });
+
+      return res.json({
+        success: false,
+        message: "Absen belum berhasil"
+      });
+    }
+
+    if (!name) {
+      await saveLog({
+        sessionId,
+        name: rawName,
+        status: "failed",
+        reason: "Nama kosong"
+      });
+
+      return res.json({
+        success: false,
+        message: "Absen belum berhasil"
+      });
+    }
+
+    const { data: result, error } = await db()
+      .rpc("mark_attendance_once", {
+        p_session_id: sessionId,
+        p_name: name
+      })
+      .single();
+
+    if (error) {
+      throw error;
+    }
+
+    if (!result.success) {
+      const reason = result.message === "QR ini sudah digunakan untuk absen"
+        ? "QR sudah digunakan"
+        : "SessionId tidak valid";
+
+      await saveLog({
+        sessionId,
+        name,
+        status: "failed",
+        reason
+      });
+
+      return res.json({
+        success: false,
+        message: result.message || "Absen belum berhasil"
+      });
+    }
+
+    await saveLog({
       sessionId,
       name,
-      status: "failed",
-      reason: "SessionId tidak valid"
+      status: "success",
+      reason: "Absen berhasil",
+      time: result.attended_at
     });
 
-    data.globalLogs.push(log);
-    writeData(data);
+    res.json({
+      success: true,
+      message: "Absen berhasil"
+    });
+  } catch (error) {
+    console.error(error);
 
-    return res.json({
+    res.status(500).json({
       success: false,
       message: "Absen belum berhasil"
     });
   }
-
-  if (!name) {
-    const log = createLog({
-      sessionId,
-      name: rawName,
-      status: "failed",
-      reason: "Nama kosong"
-    });
-
-    sessionData.logs.push(log);
-    data.globalLogs.push(log);
-    writeData(data);
-
-    return res.json({
-      success: false,
-      message: "Absen belum berhasil"
-    });
-  }
-
-  const qrAlreadyUsed = Boolean(sessionData.usedAt) || sessionData.attendees.length > 0;
-
-  if (qrAlreadyUsed) {
-    const log = createLog({
-      sessionId,
-      name,
-      status: "failed",
-      reason: "QR sudah digunakan"
-    });
-
-    sessionData.logs.push(log);
-    data.globalLogs.push(log);
-    writeData(data);
-
-    return res.json({
-      success: false,
-      message: "QR ini sudah digunakan untuk absen"
-    });
-  }
-
-  const attendanceTime = new Date().toISOString();
-  const attendee = {
-    name,
-    time: attendanceTime
-  };
-
-  sessionData.attendees.push(attendee);
-  sessionData.usedAt = attendanceTime;
-
-  const log = createLog({
-    sessionId,
-    name,
-    status: "success",
-    reason: "Absen berhasil"
-  });
-
-  sessionData.logs.push(log);
-  data.globalLogs.push(log);
-  writeData(data);
-
-  res.json({
-    success: true,
-    message: "Absen berhasil"
-  });
 });
 
 app.listen(PORT, "0.0.0.0", () => {
