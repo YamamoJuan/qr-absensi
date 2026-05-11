@@ -4,27 +4,14 @@ const sessionIdText = document.getElementById("sessionIdText");
 const qrImage = document.getElementById("qrImage");
 const message = document.getElementById("message");
 
-let attendanceLink = document.getElementById("attendanceLink");
-
-if (!attendanceLink && qrSection) {
-  attendanceLink = document.createElement("a");
-  attendanceLink.id = "attendanceLink";
-  attendanceLink.target = "_blank";
-  attendanceLink.rel = "noopener noreferrer";
-  attendanceLink.style.display = "block";
-  attendanceLink.style.marginTop = "12px";
-  attendanceLink.style.wordBreak = "break-all";
-  attendanceLink.textContent = "Buka link absensi";
-  qrSection.appendChild(attendanceLink);
-}
-
 generateBtn.addEventListener("click", async () => {
   try {
     generateBtn.disabled = true;
     generateBtn.textContent = "Membuat QR...";
 
     const response = await fetch("/api/generate-session", {
-      method: "POST"
+      method: "POST",
+      cache: "no-store"
     });
 
     const result = await response.json();
@@ -37,11 +24,6 @@ generateBtn.addEventListener("click", async () => {
 
     sessionIdText.textContent = result.sessionId;
     qrImage.src = result.qrCodeDataUrl;
-
-    if (attendanceLink) {
-      attendanceLink.href = result.attendanceUrl;
-      attendanceLink.textContent = result.attendanceUrl;
-    }
 
     qrSection.classList.remove("hidden");
 
