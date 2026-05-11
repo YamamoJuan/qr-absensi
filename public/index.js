@@ -15,8 +15,9 @@ generateBtn.addEventListener("click", async () => {
 
     const result = await response.json();
 
-    if (!result.success) {
-      showMessage("QR gagal dibuat", false);
+    if (!response.ok || !result.success) {
+      const backendError = result.error?.message ? ` Detail: ${result.error.message}` : "";
+      showMessage(`${result.message || "QR gagal dibuat"}.${backendError}`, false);
       return;
     }
 
@@ -27,7 +28,7 @@ generateBtn.addEventListener("click", async () => {
 
     showMessage("QR berhasil dibuat. Silakan scan untuk absen.", true);
   } catch (error) {
-    showMessage("QR gagal dibuat", false);
+    showMessage(`QR gagal dibuat. Detail: ${error.message}`, false);
   } finally {
     generateBtn.disabled = false;
     generateBtn.textContent = "Generate QR";

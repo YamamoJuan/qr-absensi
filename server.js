@@ -3,17 +3,26 @@ require("dotenv").config();
 const express = require("express");
 const path = require("path");
 const crypto = require("crypto");
-const session = require("express-session");
 const QRCode = require("qrcode");
 const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 
+app.set("trust proxy", 1);
+
 const PORT = process.env.PORT || 3000;
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin12345";
-const SESSION_SECRET = process.env.SESSION_SECRET || "qr-attendance-secret-2026";
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY;
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "kasming";
+const SESSION_SECRET = process.env.SESSION_SECRET || "qr-attendance-secret-2026-change-this";
+
+const SUPABASE_URL =
+  process.env.SUPABASE_URL ||
+  process.env.NEXT_PUBLIC_SUPABASE_URL ||
+  process.env.VITE_SUPABASE_URL;
+
+const SUPABASE_SERVICE_ROLE_KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_SECRET_KEY ||
+  process.env.SUPABASE_SERVICE_KEY;
 
 const supabase = SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
   ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
@@ -26,26 +35,11 @@ const supabase = SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-app.use(
-  session({
-    secret: SESSION_SECRET,
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      httpOnly: true,
-      maxAge: 1000 * 60 * 60 * 2,
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production"
-    }
-  })
-);
-
 app.use(express.static(path.join(__dirname, "public")));
 
 function db() {
   if (!supabase) {
-    throw new Error("Supabase belum dikonfigurasi. Isi SUPABASE_URL dan SUPABASE_SERVICE_ROLE_KEY.");
+    throw new Error("Supabase belum dikonfigurasi. Isi SUPABASE_URL dan SUPABASE_SERVICE_ROLE_KEY di Vercel Environment Variables.");
   }
 
   return supabase;
@@ -56,7 +50,111 @@ function getBaseUrl(req) {
 }
 
 function isUuid(value) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i.test(value);
+}
+
+function getCookie(req, name) {
+  const cookieHeader = req.headers.cookie || "";
+  const cookies = cookieHeader.split(";").map((cookie) => cookie.trim());
+
+  for (const cookie of cookies) {
+    const [key, ...valueParts] = cookie.split("=");
+    if (key === name) {
+      return decodeURIComponent(valueParts.join("="));
+    }
+  }
+
+  return null;
+}
+
+function signToken(payload) {
+  return crypto
+    .createHmac("sha256", SESSION_SECRET)
+    .update(payload)
+    .digest("hex");
+}
+
+function createAdminToken() {
+  const timestamp = String(Date.now());
+  const signature = signToken(timestamp);
+  return `${timestamp}.${signature}`;
+}
+
+function safeEqual(a, b) {
+  const aBuffer = Buffer.from(String(a));
+  const bBuffer = Buffer.from(String(b));
+
+  if (aBuffer.length !== bBuffer.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(aBuffer, bBuffer);
+}
+
+function verifyAdminToken(token) {
+  if (!token || !token.includes(".")) {
+    return false;
+  }
+
+  const [timestamp, signature] = token.split(".");
+  const createdAt = Number(timestamp);
+
+  if (!createdAt || Number.isNaN(createdAt)) {
+    return false;
+  }
+
+  const maxAgeMs = 1000 * 60 * 60 * 2;
+  const isExpired = Date.now() - createdAt > maxAgeMs;
+
+  if (isExpired) {
+    return false;
+  }
+
+  const expectedSignature = signToken(timestamp);
+  return safeEqual(signature, expectedSignature);
+}
+
+function setAdminCookie(res) {
+  const token = createAdminToken();
+  const secureFlag = process.env.NODE_ENV === "production" ? "; Secure" : "";
+
+  res.setHeader(
+    "Set-Cookie",
+    `admin_auth=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=7200${secureFlag}`
+  );
+}
+
+function clearAdminCookie(res) {
+  const secureFlag = process.env.NODE_ENV === "production" ? "; Secure" : "";
+
+  res.setHeader(
+    "Set-Cookie",
+    `admin_auth=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureFlag}`
+  );
+}
+
+function isAdmin(req) {
+  const token = getCookie(req, "admin_auth");
+  return verifyAdminToken(token);
+}
+
+function requireAdmin(req, res, next) {
+  if (isAdmin(req)) {
+    return next();
+  }
+
+  return res.redirect("/admin/login");
+}
+
+function requireAdminApi(req, res, next) {
+  if (isAdmin(req)) {
+    return next();
+  }
+
+  return res.status(401).json({
+    success: false,
+    message: "Unauthorized"
+  });
 }
 
 function mapSessionRow(sessionRow) {
@@ -87,38 +185,99 @@ function mapLogRow(logRow) {
 }
 
 async function saveLog({ sessionId, name, status, reason, time }) {
-  const { error } = await db()
-    .from("attendance_logs")
-    .insert({
-      session_id: sessionId || null,
-      name: name || null,
-      status,
-      reason,
-      created_at: time || new Date().toISOString()
+  try {
+    const { error } = await db()
+      .from("attendance_logs")
+      .insert({
+        session_id: sessionId || null,
+        name: name || null,
+        status,
+        reason,
+        created_at: time || new Date().toISOString()
+      });
+
+    if (error) {
+      console.error("SAVE_LOG_ERROR", error);
+    }
+  } catch (error) {
+    console.error("SAVE_LOG_FATAL", error);
+  }
+}
+
+function getEnvStatus() {
+  return {
+    NODE_ENV: process.env.NODE_ENV || null,
+    ADMIN_PASSWORD_EXISTS: Boolean(process.env.ADMIN_PASSWORD),
+    SESSION_SECRET_EXISTS: Boolean(process.env.SESSION_SECRET),
+
+    SUPABASE_URL_EXISTS: Boolean(process.env.SUPABASE_URL),
+    NEXT_PUBLIC_SUPABASE_URL_EXISTS: Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL),
+    VITE_SUPABASE_URL_EXISTS: Boolean(process.env.VITE_SUPABASE_URL),
+
+    SUPABASE_SERVICE_ROLE_KEY_EXISTS: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
+    SUPABASE_SECRET_KEY_EXISTS: Boolean(process.env.SUPABASE_SECRET_KEY),
+    SUPABASE_SERVICE_KEY_EXISTS: Boolean(process.env.SUPABASE_SERVICE_KEY),
+
+    SUPABASE_ANON_KEY_EXISTS_BUT_NOT_USED: Boolean(process.env.SUPABASE_ANON_KEY),
+
+    resolvedSupabaseUrl: Boolean(SUPABASE_URL),
+    resolvedSupabaseServerKey: Boolean(SUPABASE_SERVICE_ROLE_KEY)
+  };
+}
+
+async function databaseDebugHandler(req, res) {
+  const envStatus = getEnvStatus();
+
+  if (!supabase) {
+    return res.status(500).json({
+      success: false,
+      message: "Supabase env belum kebaca oleh Vercel runtime.",
+      envStatus,
+      fix: [
+        "Pastikan env ada di Vercel Project Settings.",
+        "Nama wajib: SUPABASE_URL dan SUPABASE_SERVICE_ROLE_KEY.",
+        "Pastikan dicentang untuk Production.",
+        "Redeploy setelah env ditambahkan."
+      ]
     });
-
-  if (error) {
-    console.error("Failed to save log:", error.message);
-  }
-}
-
-function requireAdmin(req, res, next) {
-  if (req.session && req.session.isAdmin === true) {
-    return next();
   }
 
-  return res.redirect("/admin/login");
-}
+  try {
+    const sessionsCheck = await db()
+      .from("attendance_sessions")
+      .select("id, created_at, used_at")
+      .limit(1);
 
-function requireAdminApi(req, res, next) {
-  if (req.session && req.session.isAdmin === true) {
-    return next();
+    if (sessionsCheck.error) {
+      return res.status(500).json({
+        success: false,
+        message: "Supabase connect, tapi tabel belum siap / query gagal.",
+        envStatus,
+        supabaseError: {
+          message: sessionsCheck.error.message,
+          code: sessionsCheck.error.code || null,
+          details: sessionsCheck.error.details || null,
+          hint: sessionsCheck.error.hint || null
+        }
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: "Supabase connected dan tabel attendance_sessions bisa dibaca.",
+      envStatus,
+      sampleRows: sessionsCheck.data || []
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Database debug gagal.",
+      envStatus,
+      error: {
+        message: error.message
+      }
+    });
   }
-
-  return res.status(401).json({
-    success: false,
-    message: "Unauthorized"
-  });
 }
 
 app.get("/", (req, res) => {
@@ -126,7 +285,7 @@ app.get("/", (req, res) => {
 });
 
 app.get("/admin/login", (req, res) => {
-  if (req.session && req.session.isAdmin === true) {
+  if (isAdmin(req)) {
     return res.redirect("/admin");
   }
 
@@ -137,22 +296,24 @@ app.post("/admin/login", (req, res) => {
   const password = req.body.password || "";
 
   if (password === ADMIN_PASSWORD) {
-    req.session.isAdmin = true;
+    setAdminCookie(res);
     return res.redirect("/admin");
   }
 
+  clearAdminCookie(res);
   return res.redirect("/admin/login?error=1");
 });
 
-app.post("/admin/logout", requireAdmin, (req, res) => {
-  req.session.destroy(() => {
-    res.redirect("/admin/login");
-  });
+app.post("/admin/logout", (req, res) => {
+  clearAdminCookie(res);
+  return res.redirect("/admin/login");
 });
 
 app.get("/admin", requireAdmin, (req, res) => {
   res.sendFile(path.join(__dirname, "views", "admin.html"));
 });
+
+app.get(["/api/debug/database", "/api/debug/supabase"], databaseDebugHandler);
 
 app.get("/attendance/:sessionId", async (req, res) => {
   try {
@@ -182,8 +343,13 @@ app.get("/attendance/:sessionId", async (req, res) => {
 
     return res.sendFile(path.join(__dirname, "public", "attendance.html"));
   } catch (error) {
-    console.error(error);
-    return res.status(500).send("Terjadi kesalahan server.");
+    console.error("ATTENDANCE_PAGE_ERROR", error);
+
+    return res.status(500).send(`
+      <h1>Terjadi kesalahan server</h1>
+      <p>${error.message}</p>
+      <p>Cek /api/debug/database untuk detail koneksi Supabase.</p>
+    `);
   }
 });
 
@@ -206,18 +372,29 @@ app.post("/api/generate-session", async (req, res) => {
     const attendanceUrl = `${getBaseUrl(req)}/attendance/${sessionId}`;
     const qrCodeDataUrl = await QRCode.toDataURL(attendanceUrl);
 
-    res.json({
+    return res.json({
       success: true,
       sessionId,
       attendanceUrl,
       qrCodeDataUrl
     });
   } catch (error) {
-    console.error(error);
+    console.error("GENERATE_SESSION_ERROR", {
+      message: error.message,
+      code: error.code || null,
+      details: error.details || null,
+      hint: error.hint || null
+    });
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: "Gagal membuat QR Code"
+      message: "Gagal membuat QR Code",
+      error: {
+        message: error.message,
+        code: error.code || null,
+        details: error.details || null,
+        hint: error.hint || null
+      }
     });
   }
 });
@@ -267,17 +444,20 @@ app.get("/api/sessions", requireAdminApi, async (req, res) => {
       }
     });
 
-    res.json({
+    return res.json({
       success: true,
       sessions,
       globalLogs
     });
   } catch (error) {
-    console.error(error);
+    console.error("GET_SESSIONS_ERROR", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: "Gagal mengambil data monitoring"
+      message: "Gagal mengambil data monitoring",
+      error: {
+        message: error.message
+      }
     });
   }
 });
@@ -328,16 +508,19 @@ app.get("/api/session/:sessionId", requireAdminApi, async (req, res) => {
     sessionData.attendees = (attendees || []).map(mapAttendeeRow);
     sessionData.logs = (logs || []).map(mapLogRow);
 
-    res.json({
+    return res.json({
       success: true,
       session: sessionData
     });
   } catch (error) {
-    console.error(error);
+    console.error("GET_SESSION_DETAIL_ERROR", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: "Gagal mengambil session"
+      message: "Gagal mengambil session",
+      error: {
+        message: error.message
+      }
     });
   }
 });
@@ -413,22 +596,37 @@ app.post("/api/attendance/:sessionId", async (req, res) => {
       time: result.attended_at
     });
 
-    res.json({
+    return res.json({
       success: true,
       message: "Absen berhasil"
     });
   } catch (error) {
-    console.error(error);
+    console.error("ATTENDANCE_SUBMIT_ERROR", {
+      message: error.message,
+      code: error.code || null,
+      details: error.details || null,
+      hint: error.hint || null
+    });
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: "Absen belum berhasil"
+      message: "Absen belum berhasil",
+      error: {
+        message: error.message,
+        code: error.code || null,
+        details: error.details || null,
+        hint: error.hint || null
+      }
     });
   }
 });
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server running at http://localhost:${PORT}`);
-  console.log(`Main page: http://localhost:${PORT}`);
-  console.log(`Admin login: http://localhost:${PORT}/admin/login`);
-});
+if (require.main === module) {
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running at http://localhost:${PORT}`);
+    console.log(`Main page: http://localhost:${PORT}`);
+    console.log(`Admin login: http://localhost:${PORT}/admin/login`);
+  });
+}
+
+module.exports = app;
